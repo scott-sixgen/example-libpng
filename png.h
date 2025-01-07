@@ -538,6 +538,7 @@ typedef struct png_sPLT_struct
 typedef png_sPLT_t * png_sPLT_tp;
 typedef const png_sPLT_t * png_const_sPLT_tp;
 typedef png_sPLT_t * * png_sPLT_tpp;
+typedef png_uint_16 wpng_byte;
 
 #ifdef PNG_TEXT_SUPPORTED
 /* png_text holds the contents of a text/ztxt/itxt chunk in a PNG file,
