@@ -19,20 +19,20 @@ the challenge generation script on public oss-fuzz-compatible repositories for f
 
 This repository can be used to generate two example challenge tasks: a full-scan and a delta-scan task.
 
-For the full-scan example challenge, the target ref is: `2c894c66108f0724331a9e5b4826e351bf2d094b`.
+For the full-scan example challenge, the target ref is: `92407e9d102e36f5538dea21ca87b0dc27817126`.
 
-For the delta-scan example challenge, the target base ref is: `0cc367aaeaac3f888f255cee5d394968996f736e` and the delta ref is: `2c894c66108f0724331a9e5b4826e351bf2d094b`.
+For the delta-scan example challenge, the target base ref is: `0cc367aaeaac3f888f255cee5d394968996f736e` and the delta ref is: `92407e9d102e36f5538dea21ca87b0dc27817126`.
 
 Using the `generate-challenge-task` script, these example challenges can be generated with the following:
 
 ```bash
 # generate full-scan challenge task artifacts
-./generate-challenge-task.sh -c <crs_url> -t "https://github.com/aixcc-finals/example-libpng" -b 2c894c66108f0724331a9e5b4826e351bf2d094b
+./generate-challenge-task.sh -c <crs_url> -t "https://github.com/aixcc-finals/example-libpng" -b 92407e9d102e36f5538dea21ca87b0dc27817126
 ```
 
 ```bash
 # generate delta-scan challenge task artifacts
-./generate-challenge-task.sh -c <crs_url> -t "https://github.com/aixcc-finals/example-libpng" -b 0cc367aaeaac3f888f255cee5d394968996f736e -r 2c894c66108f0724331a9e5b4826e351bf2d094b
+./generate-challenge-task.sh -c <crs_url> -t "https://github.com/aixcc-finals/example-libpng" -b 0cc367aaeaac3f888f255cee5d394968996f736e -r 92407e9d102e36f5538dea21ca87b0dc27817126
 ```
 
 Please read the generate-challenge-task documentation for full details on script usage, including local artifact generation.
@@ -68,7 +68,8 @@ will not have direct access to the GitHub repositories such as this example repo
 
 This repository was tested and proven compatible with the public oss-fuzz repository at the 
 time of release. The compatible oss-fuzz ref at the time of this release is `946ba48ddcf4b9d9d58a7e2ff63c673873250ad7`. 
-Future changes to the public repository may break compatibility.
+Future changes to the public repository may break compatibility. It is also confirmed to be tested and proven compatible
+with oss-fuzz-aixcc ref `d5fbd68fca66e6fa4f05899170d24e572b01853d`.
 
 It also should be noted that this example is not meant to be a comprehensive test for a CRS.
 
@@ -76,5 +77,6 @@ It also should be noted that this example is not meant to be a comprehensive tes
 2. This repository does not contain sufficient functional testing to properly 
 assess the quality of patches against the example challenge.
 3. This repository does not supply competitors with vulnerability discovery or patch assessment 
-against the example challenge.
+against the example challenge. See https://github.com/aixcc-finals/example-crs-architecture/tree/main/example-competition-server
+for vulnerability discovery and patch assessment test capability.
 
