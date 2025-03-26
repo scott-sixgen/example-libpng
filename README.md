@@ -19,20 +19,20 @@ the challenge generation script on public oss-fuzz-compatible repositories for f
 
 This repository can be used to generate two example challenge tasks: a full-scan and a delta-scan task.
 
-For the full-scan example challenge, the target ref is: `92407e9d102e36f5538dea21ca87b0dc27817126`.
+These challenges are represented in their respective branches, `challenges/full-scan` and `challenges/delta-scan`.
 
-For the delta-scan example challenge, the target base ref is: `0cc367aaeaac3f888f255cee5d394968996f736e` and the delta ref is: `92407e9d102e36f5538dea21ca87b0dc27817126`.
+The target refs for each challenge, along with other challenge information, can be found in `.aixcc/challenge.yaml` in each branch.
 
 Using the `generate-challenge-task` script, these example challenges can be generated with the following:
 
 ```bash
 # generate full-scan challenge task artifacts
-./generate-challenge-task.sh -c <crs_url> -t "https://github.com/aixcc-finals/example-libpng" -b 92407e9d102e36f5538dea21ca87b0dc27817126
+./generate-challenge-task.sh -c <crs_url> -t "https://github.com/aixcc-finals/example-libpng" -b fdacd5a1dcff42175117d674b0fda9f8a005ae88
 ```
 
 ```bash
 # generate delta-scan challenge task artifacts
-./generate-challenge-task.sh -c <crs_url> -t "https://github.com/aixcc-finals/example-libpng" -b 0cc367aaeaac3f888f255cee5d394968996f736e -r 92407e9d102e36f5538dea21ca87b0dc27817126
+./generate-challenge-task.sh -c <crs_url> -t "https://github.com/aixcc-finals/example-libpng" -b 0cc367aaeaac3f888f255cee5d394968996f736e -r fdacd5a1dcff42175117d674b0fda9f8a005ae88
 ```
 
 Please read the generate-challenge-task documentation for full details on script usage, including local artifact generation.
@@ -53,7 +53,7 @@ To reproduce the crash using the provided fuzz-tooling (oss-fuzz), the `helper.p
 <generated-fuzz-tooling-path>/infra/helper.py check_build libpng
 
 # reproduce crash with input
-<generated-fuzz-tooling-path>/infra/helper.py reproduce libpng libpng_read_fuzzer .aixcc/sample_data.bin
+<generated-fuzz-tooling-path>/infra/helper.py reproduce libpng libpng_read_fuzzer .aixcc/vulns/vuln_0/blobs/sample_data.bin
 ```
 
 Note: if a delta-scan task was generated, the crash will not occur until the delta diff is applied.
