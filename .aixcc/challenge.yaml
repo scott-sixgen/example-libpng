@@ -10,7 +10,7 @@ fuzz_tooling_ref: "v1.0.0"
 challenge_type: delta     # full | delta
 
 base_ref: 0cc367aaeaac3f888f255cee5d394968996f736e
-delta_ref: f9ab4c2c94b77ddde4cf2de8208093490f96622b
+delta_ref: fdacd5a1dcff42175117d674b0fda9f8a005ae88
 
 # A list of the vulnerabilities included in this challenge
 # This should always match the dir names in .aixcc/vulns/*
