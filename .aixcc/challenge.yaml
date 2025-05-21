@@ -1,0 +1,28 @@
+metadata_spec_version: v1
+
+name: 'Example Libpng Delta Scan'
+
+# fuzz_tooling project info that pairs to this challenge
+fuzz_tooling_project_name: 'libpng'
+fuzz_tooling_url: "https://github.com/aixcc-finals/oss-fuzz-aixcc.git"
+fuzz_tooling_ref: "challenge-state/lp-delta-01"
+
+challenge_type: delta     # full | delta
+
+base_ref: 5bf8da2d7953974e5dfbd778429c3affd461f51a
+delta_ref: challenges/lp-delta-01
+
+# A list of the vulnerabilities included in this challenge
+# This should always match the dir names in .aixcc/vulns/*
+vulnerabilities:
+    - vuln_0
+
+sarif:
+    broadcast: false
+    target: null
+    correct: null
+
+# harness fuzz targets available for this challenge
+harnesses:
+    - 'libpng_read_fuzzer'
+
