@@ -1,6 +1,6 @@
 # Install this trusted workflow on the selected repository's default branch.
 # It submits metadata only; analysis runs through Faultline's Keystone pipeline.
-name: Faultline PR intake
+name: Faultline PR scan
 on:
   pull_request_target:
     types: [opened, synchronize, reopened]
@@ -14,9 +14,13 @@ jobs:
       github.event.pull_request.base.repo.full_name == github.repository &&
       github.event.pull_request.base.ref == vars.FAULTLINE_BASE_BRANCH
     runs-on: [self-hosted, "${{ vars.FAULTLINE_RUNNER_LABEL }}"]
-    timeout-minutes: 5
+    timeout-minutes: 120
+    outputs:
+      run_id: ${{ steps.scan.outputs.run_id }}
+      terminal_state: ${{ steps.scan.outputs.terminal_state }}
     steps:
-      - name: Submit exact PR pair (intake only)
+      - name: Scan exact PR pair
+        id: scan
         shell: bash
         env:
           FAULTLINE_URL: ${{ vars.FAULTLINE_URL }}
@@ -26,9 +30,16 @@ jobs:
         run: |
           set +x
           set -euo pipefail
+          accepted=false
           fail() {
             printf '%s\n' "$1" >&2
-            if [[ -n ${GITHUB_STEP_SUMMARY:-} ]]; then printf 'Faultline submission failed (intake not confirmed): %s\n' "$1" >> "$GITHUB_STEP_SUMMARY"; fi
+            if [[ -n ${GITHUB_STEP_SUMMARY:-} ]]; then
+              if [[ $accepted == true ]]; then
+                printf 'Analysis unavailable or unconfirmed; this check failed closed.\n' >> "$GITHUB_STEP_SUMMARY"
+              else
+                printf 'Faultline submission failed (intake not confirmed): %s\n' "$1" >> "$GITHUB_STEP_SUMMARY"
+              fi
+            fi
             exit 1
           }
           command -v jq >/dev/null || fail 'Runner requires installed jq.'
@@ -39,6 +50,7 @@ jobs:
           [[ ${GITHUB_EVENT_NAME:-} == pull_request_target ]] || fail 'Expected pull_request_target event.'
           [[ -n ${FAULTLINE_BASE_BRANCH:-} ]] || fail 'Set trusted FAULTLINE_BASE_BRANCH repository variable.'
           [[ -n ${GITHUB_STEP_SUMMARY:-} ]] || fail 'Missing Actions job summary path.'
+          [[ -n ${GITHUB_OUTPUT:-} ]] || fail 'Missing Actions output path.'
           [[ ${FAULTLINE_URL:-} =~ ^https?://([A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?|\[[0-9A-Fa-f:]+\])(:[0-9]{1,5})?$ ]] || fail 'Set FAULTLINE_URL to the trusted API origin, without path, credentials, query or fragment.'
           if [[ $FAULTLINE_URL == http://* && ${FAULTLINE_ALLOW_HTTP:-} != true ]]; then fail 'HTTP requires explicit operator FAULTLINE_ALLOW_HTTP=true; prefer trusted HTTPS.'; fi
           [[ ${GITHUB_REPOSITORY:-} =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || fail 'Missing canonical workflow repository.'
@@ -53,7 +65,7 @@ jobs:
           jq -es --arg repo "$GITHUB_REPOSITORY" --argjson rid "$GITHUB_REPOSITORY_ID" \
             --arg branch "$FAULTLINE_BASE_BRANCH" --argjson run "$GITHUB_RUN_ID" --argjson attempt "$GITHUB_RUN_ATTEMPT" '
             def positive: type == "number" and . > 0 and floor == .;
-            def sha: type == "string" and test("^[0-9a-f]{40}$");
+            def sha: type == "string" and length == 40 and test("^[0-9a-f]{40}$");
             select(length == 1) | .[0] |
             select(type == "object" and (.action == "opened" or .action == "synchronize" or .action == "reopened")) |
             select(.repository.id == $rid and .repository.full_name == $repo) |
@@ -71,6 +83,7 @@ jobs:
           printf 'Authorization: Bearer %s\nContent-Type: application/json\nAccept: application/json\n' "$FAULTLINE_TOKEN" > "$private/headers"
           unset FAULTLINE_TOKEN
           for attempt in 1 2 3; do
+            : > "$private/response"
             rc=0
             status=$(curl -q --silent --proto '=https,http' --connect-timeout 10 --max-time 30 \
               --max-filesize 65536 --header "@$private/headers" --data-binary "@$private/request" \
@@ -85,15 +98,100 @@ jobs:
             [[ $retry == true && $attempt != 3 ]] || fail "Faultline intake rejected or unavailable (HTTP $status, curl $rc)."
             sleep "$attempt"
           done
-          id=$(jq -ers --slurpfile request "$private/request" '
-            select(length == 1) | .[0] |
-            select(.id | type == "string" and test("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")) |
+          identity() {
+            jq -ers --arg expected "$1" --slurpfile request "$private/request" '
+            select(length == 1) | .[0] | select(type == "object") |
+            select(.id | type == "string" and length == 36 and test("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")) |
+            select($expected == "" or .id == $expected) |
             select(.base_ref == $request[0].base_sha and .delta_ref == $request[0].head_sha) |
+            select(.trigger.schema_version == 1 and .trigger.source == "github-actions") |
+            select(.trigger.repository_id == $request[0].repository_id and .trigger.repository == $request[0].repository) |
+            select(.trigger.pull_request == $request[0].pull_request and .trigger.base_branch == $request[0].base_branch) |
             select(.trigger.base_sha == $request[0].base_sha and .trigger.head_sha == $request[0].head_sha) | .id
-            ' "$private/response" 2>/dev/null) || fail 'Invalid intake response UUID or commit pair.'
+            ' "$private/response" 2>/dev/null
+          }
+          id=$(identity '') || fail 'Invalid intake response UUID, repository, PR or exact pair.'
+          duration=$(jq -er '.duration_seconds | select(type == "number" and . > 0 and . <= 6000 and floor == .)' "$private/response" 2>/dev/null) || fail 'Invalid admitted scan duration.'
+          accepted=true
+          printf 'run_id=%s\n' "$id" >> "$GITHUB_OUTPUT"
           base=$(jq -r .base_sha "$private/request")
           head=$(jq -r .head_sha "$private/request")
-          printf 'Faultline accepted intake only; analysis completion is reported in Faultline.\n' \
-            >> "$GITHUB_STEP_SUMMARY"
+          printf 'Faultline intake accepted; awaiting scan report.\n' >> "$GITHUB_STEP_SUMMARY"
           printf '[Open persisted run](%s/ui/#/runs/%s)\n\nBase: `%s`\n\nHead: `%s`\n\n' "$FAULTLINE_URL" "$id" "$base" "$head" >> "$GITHUB_STEP_SUMMARY"
-          printf 'Duplicate identity is the exact pair plus resolved analysis configuration. A rerun returns the original run; a new pair or configuration creates another run. No GitHub checks are written.\n' >> "$GITHUB_STEP_SUMMARY"
+          printf 'Duplicate identity is the exact pair plus resolved analysis configuration. A rerun returns the original run; a new pair or configuration creates another run.\nCRS acceptance and budget expiry do not prove external source-download/build/fuzz execution health or repository safety.\n' >> "$GITHUB_STEP_SUMMARY"
+          deadline=$(( $(date +%s) + duration + 900 ))
+          remaining_budget() {
+            remaining=$((deadline - $(date +%s)))
+            (( remaining > 0 )) || fail 'Polling deadline expired.'
+          }
+          budget_sleep() {
+            remaining_budget
+            delay=$1
+            (( delay <= remaining )) || delay=$remaining
+            sleep "$delay"
+          }
+          while true; do
+            for attempt in 1 2 3; do
+              remaining_budget
+              max_time=$remaining
+              (( max_time <= 30 )) || max_time=30
+              : > "$private/response"
+              rc=0
+              status=$(curl -q --silent --proto '=https,http' --connect-timeout 10 --max-time "$max_time" \
+                --max-filesize 65536 --header "@$private/headers" --output "$private/response" \
+                --write-out '%{http_code}' "$FAULTLINE_URL/v1/runs/$id" 2>/dev/null) || rc=$?
+              remaining_budget
+              (( rc != 63 )) || fail 'Response exceeds 64 KiB; no retry.'
+              (( $(wc -c < "$private/response") <= 65536 )) || fail 'Response exceeds 64 KiB; no retry.'
+              if (( rc == 0 )) && [[ $status == 200 ]]; then break; fi
+              retry=false
+              case $rc in 5|6|7|18|28|35|52|55|56|60|92|95) retry=true ;; esac
+              if (( rc == 0 )) && [[ $status == 429 || $status =~ ^5[0-9][0-9]$ ]]; then retry=true; fi
+              [[ $retry == true && $attempt != 3 ]] || fail 'Scan report unavailable; transport rejected or retries exhausted.'
+              budget_sleep "$attempt"
+            done
+            identity "$id" >/dev/null || fail 'Invalid persisted run identity.'
+            fields=$(jq -er '
+              def count: type == "number" and . >= 0 and . <= 2147483647 and floor == .;
+              select(.state == "pending" or .state == "launching" or .state == "running" or
+                     .state == "proven" or .state == "no-findings" or .state == "failed") |
+              select(.error | type == "string") |
+              select(.fault_count | count) | select(.patch_count | count) |
+              [.state, .fault_count, .patch_count] | @tsv
+              ' "$private/response" 2>/dev/null) || fail 'Invalid scan report state or counts.'
+            IFS=$'\t' read -r state faults patches <<< "$fields"
+            case $state in
+              pending|launching|running)
+                jq -e '.error == ""' "$private/response" >/dev/null 2>&1 || fail 'Nonterminal scan reports an error.'
+                budget_sleep 15
+                continue ;;
+              proven)
+                printf 'terminal_state=proven\n' >> "$GITHUB_OUTPUT"
+                printf 'Faults: %s; candidate patches: %s.\nFindings reported; this exact-pair check fails even when candidate patches exist.\n' "$faults" "$patches" >> "$GITHUB_STEP_SUMMARY"
+                exit 1 ;;
+              failed)
+                printf 'terminal_state=failed\n' >> "$GITHUB_OUTPUT"
+                printf 'Faults: %s; candidate patches: %s.\n' "$faults" "$patches" >> "$GITHUB_STEP_SUMMARY"
+                fail 'Scan reports failure.' ;;
+              no-findings)
+                printf 'terminal_state=no-findings\n' >> "$GITHUB_OUTPUT"
+                printf 'Faults: %s; candidate patches: %s.\n' "$faults" "$patches" >> "$GITHUB_STEP_SUMMARY"
+                jq -e '
+                  def count: type == "number" and . >= 0 and . <= 2147483647 and floor == .;
+                  .state == "no-findings" and .error == "" and
+                  (.ended_at | type == "string" and test("^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](\\.[0-9]{1,9})?(Z|[+-]([01][0-9]|2[0-3]):[0-5][0-9])\\z")) and
+                  (.fault_count | count) and .fault_count == 0 and
+                  (.patch_count | count) and .patch_count == 0 and
+                  .summary.schema_version == 1 and .summary.profile == "buttercup-crs-client" and
+                  .summary.task_type == "delta" and
+                  (.summary.task_status == "succeeded" or .summary.task_status == "expired") and
+                  .summary.crs_submission_status == "success" and
+                  (.summary.pov_count | count) and .summary.pov_count == 0 and
+                  (.summary.analysis_unavailable | count) and .summary.analysis_unavailable == 0 and
+                  (.summary.patch_count | count) and .summary.patch_count == 0 and
+                  (.summary.bundle_count | count) and .summary.bundle_count == 0
+                  ' "$private/response" >/dev/null 2>&1 || fail 'Terminal scan report is incomplete or inconsistent.'
+                printf 'No findings reported within the scan budget.\n' >> "$GITHUB_STEP_SUMMARY"
+                exit 0 ;;
+            esac
+          done
