@@ -195,3 +195,122 @@ jobs:
                 exit 0 ;;
             esac
           done
+  faultline-issues:
+    needs: [faultline-submit]
+    if: >-
+      always() &&
+      needs.faultline-submit.outputs.terminal_state == 'proven' &&
+      vars.FAULTLINE_PUBLISH_ISSUES == 'true' &&
+      github.event.pull_request.head.repo.id == github.event.repository.id &&
+      github.event.pull_request.base.repo.id == github.event.repository.id &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.base.repo.full_name == github.repository &&
+      github.event.pull_request.base.ref == vars.FAULTLINE_BASE_BRANCH
+    permissions:
+      contents: read
+      pull-requests: read
+      issues: write
+    concurrency:
+      group: faultline-publication-${{ github.repository_id }}
+      cancel-in-progress: false
+    runs-on: [self-hosted, "${{ vars.FAULTLINE_RUNNER_LABEL }}"]
+    timeout-minutes: 15
+    outputs:
+      issue_result: ${{ steps.publish.outputs.issue_result }}
+      issue_count: ${{ steps.publish.outputs.issue_count }}
+    steps:
+      - name: Publish own reported finding groups
+        id: publish
+        shell: bash
+        env:
+          FAULTLINE_RUN_ID: ${{ needs.faultline-submit.outputs.run_id }}
+          FAULTLINE_PUBLISH_ISSUES: ${{ vars.FAULTLINE_PUBLISH_ISSUES }}
+          FAULTLINE_PUBLISH_REPOSITORY: ${{ vars.FAULTLINE_PUBLISH_REPOSITORY }}
+          FAULTLINE_PUBLISH_REPOSITORY_ID: ${{ vars.FAULTLINE_PUBLISH_REPOSITORY_ID }}
+          FAULTLINE_BASE_BRANCH: ${{ vars.FAULTLINE_BASE_BRANCH }}
+          FAULTLINE_PROJECT: ${{ vars.FAULTLINE_PROJECT }}
+          FAULTLINE_HARNESSES: ${{ vars.FAULTLINE_HARNESSES }}
+          FAULTLINE_PIPELINE_NAME: ${{ vars.FAULTLINE_PIPELINE_NAME }}
+          FAULTLINE_PIPELINE_VERSION: ${{ vars.FAULTLINE_PIPELINE_VERSION }}
+          FAULTLINE_URL: ${{ vars.FAULTLINE_URL }}
+          FAULTLINE_CORE_URL: ${{ vars.FAULTLINE_CORE_URL }}
+          FAULTLINE_EVIDENCE_URL: ${{ vars.FAULTLINE_EVIDENCE_URL }}
+          FAULTLINE_ALLOW_HTTP: ${{ vars.FAULTLINE_ALLOW_HTTP }}
+          FAULTLINE_TOKEN: ${{ secrets.FAULTLINE_TOKEN }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set +x
+          set -euo pipefail
+          fail() {
+            printf '%s\n' "$1" >&2
+            if [[ -n ${GITHUB_STEP_SUMMARY:-} ]]; then printf 'Faultline publication unavailable; scan verdict unchanged.\n' >> "$GITHUB_STEP_SUMMARY"; fi
+            exit 1
+          }
+          command -v python3 >/dev/null || fail 'Runner requires installed Python >= 3.10.'
+          command -v git >/dev/null || fail 'Runner requires installed Git >= 2.39.'
+          command -v curl >/dev/null || fail 'Runner requires installed curl >= 8.4.'
+          python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)' || fail 'Runner requires installed Python >= 3.10.'
+          version=$(git --version)
+          [[ $version =~ ^git\ version\ ([0-9]+)\.([0-9]+)\.([0-9]+) ]] || fail 'Cannot identify Git version.'
+          (( BASH_REMATCH[1] > 2 || (BASH_REMATCH[1] == 2 && BASH_REMATCH[2] >= 39) )) || fail 'Runner requires installed Git >= 2.39.'
+          version=$(curl -q --version)
+          [[ $version =~ ^curl\ ([0-9]+)\.([0-9]+)\.([0-9]+) ]] || fail 'Cannot identify curl version.'
+          (( BASH_REMATCH[1] > 8 || (BASH_REMATCH[1] == 8 && BASH_REMATCH[2] >= 4) )) || fail 'Runner requires installed curl >= 8.4.'
+          [[ ${FAULTLINE_PUBLISH_ISSUES:-} == true && ${GITHUB_EVENT_NAME:-} == pull_request_target ]] || fail 'Publication not enabled for this event.'
+          [[ ${GITHUB_REPOSITORY:-} =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ && $GITHUB_REPOSITORY == "${FAULTLINE_PUBLISH_REPOSITORY:-}" ]] || fail 'Publication repository rejected.'
+          [[ ${GITHUB_REPOSITORY_ID:-} =~ ^[1-9][0-9]*$ && $GITHUB_REPOSITORY_ID == "${FAULTLINE_PUBLISH_REPOSITORY_ID:-}" ]] || fail 'Publication repository ID rejected.'
+          [[ ${GITHUB_SHA:-} =~ ^[0-9a-f]{40}$ && ${#GITHUB_SHA} == 40 ]] || fail 'Missing trusted workflow SHA.'
+          [[ ${FAULTLINE_RUN_ID:-} =~ ^[0-9a-f]{8}-([0-9a-f]{4}-){3}[0-9a-f]{12}$ && ${#FAULTLINE_RUN_ID} == 36 ]] || fail 'Missing validated run UUID.'
+          [[ -n ${GITHUB_OUTPUT:-} && -n ${GITHUB_STEP_SUMMARY:-} ]] || fail 'Missing Actions output paths.'
+          [[ ${GITHUB_TOKEN:-} =~ ^[!-~]+$ && ${#GITHUB_TOKEN} -le 4096 && ${FAULTLINE_TOKEN:-} =~ ^[!-~]+$ && ${#FAULTLINE_TOKEN} -le 4096 ]] || fail 'Missing private publication credentials.'
+          umask 077
+          private=$(mktemp -d)
+          trap 'rm -rf -- "$private"' EXIT
+          printf 'Authorization: Bearer %s\n' "$GITHUB_TOKEN" > "$private/github.headers"
+          printf 'Authorization: Bearer %s\n' "$FAULTLINE_TOKEN" > "$private/faultline.headers"
+          unset GITHUB_TOKEN GH_TOKEN FAULTLINE_TOKEN
+          status=$(curl -q --silent --proto '=https' --proxy '' --noproxy '*' --connect-timeout 10 --max-time 30 \
+            --max-filesize 262144 --header "@$private/github.headers" --header 'Accept: application/vnd.github+json' \
+            --header 'X-GitHub-Api-Version: 2022-11-28' --output "$private/contents" --write-out '%{http_code}' \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/contents/.github/faultline-publish.py?ref=$GITHUB_SHA" 2>/dev/null) || fail 'Trusted helper download unavailable.'
+          [[ $status == 200 ]] || fail 'Trusted helper download rejected.'
+          (( $(wc -c < "$private/contents") <= 262144 )) || fail 'Trusted helper response oversized.'
+          python3 - "$private/contents" "$private/publisher.py" <<'PY' || fail 'Trusted helper identity rejected.'
+          import base64, hashlib, json, math, pathlib, sys
+          def check(condition):
+              if not condition: raise ValueError()
+          def pairs(items):
+              result = {}
+              for key, value in items:
+                  if key in result: raise ValueError()
+                  result[key] = value
+              return result
+          def finite(value):
+              result = float(value)
+              if not math.isfinite(result): raise ValueError()
+              return result
+          def invalid(_): raise ValueError()
+          try:
+              value = json.loads(pathlib.Path(sys.argv[1]).read_bytes(), object_pairs_hook=pairs, parse_float=finite, parse_constant=invalid)
+              check(type(value) is dict and value.get('type') == 'file' and value.get('path') == '.github/faultline-publish.py' and value.get('encoding') == 'base64')
+              check(type(value.get('size')) is int and 0 < value['size'] <= 131072 and type(value.get('content')) is str)
+              source = base64.b64decode(''.join(value['content'].splitlines()), validate=True)
+              check(len(source) == value['size'])
+              source.decode('utf-8')
+              actual = hashlib.sha1(b'blob ' + str(len(source)).encode() + b'\0' + source).hexdigest()
+              check(actual == value.get('sha') == 'd60a4e7e7fcc63d365e732a4a8e97ff8d3ea6251')
+              pathlib.Path(sys.argv[2]).write_bytes(source)
+          except Exception:
+              sys.exit(1)
+          PY
+          env -i PATH="$PATH" \
+            FAULTLINE_URL="$FAULTLINE_URL" FAULTLINE_CORE_URL="$FAULTLINE_CORE_URL" FAULTLINE_EVIDENCE_URL="$FAULTLINE_EVIDENCE_URL" \
+            FAULTLINE_ALLOW_HTTP="${FAULTLINE_ALLOW_HTTP:-}" FAULTLINE_PUBLISH_ISSUES="$FAULTLINE_PUBLISH_ISSUES" \
+            FAULTLINE_PUBLISH_REPOSITORY="$FAULTLINE_PUBLISH_REPOSITORY" FAULTLINE_PUBLISH_REPOSITORY_ID="$FAULTLINE_PUBLISH_REPOSITORY_ID" \
+            FAULTLINE_BASE_BRANCH="$FAULTLINE_BASE_BRANCH" FAULTLINE_PROJECT="$FAULTLINE_PROJECT" FAULTLINE_HARNESSES="$FAULTLINE_HARNESSES" \
+            FAULTLINE_PIPELINE_NAME="$FAULTLINE_PIPELINE_NAME" FAULTLINE_PIPELINE_VERSION="$FAULTLINE_PIPELINE_VERSION" \
+            FAULTLINE_HEADERS_FILE="$private/faultline.headers" GITHUB_HEADERS_FILE="$private/github.headers" \
+            GITHUB_EVENT_NAME="$GITHUB_EVENT_NAME" GITHUB_EVENT_PATH="$GITHUB_EVENT_PATH" \
+            GITHUB_REPOSITORY="$GITHUB_REPOSITORY" GITHUB_REPOSITORY_ID="$GITHUB_REPOSITORY_ID" \
+            GITHUB_OUTPUT="$GITHUB_OUTPUT" GITHUB_STEP_SUMMARY="$GITHUB_STEP_SUMMARY" \
+            python3 "$private/publisher.py" issues --run-id "$FAULTLINE_RUN_ID"
