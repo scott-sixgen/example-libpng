@@ -1,0 +1,99 @@
+# Install this trusted workflow on the selected repository's default branch.
+# It submits metadata only; analysis runs through Faultline's Keystone pipeline.
+name: Faultline PR intake
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+permissions: {}
+jobs:
+  faultline-submit:
+    if: >-
+      github.event.pull_request.head.repo.id == github.event.repository.id &&
+      github.event.pull_request.base.repo.id == github.event.repository.id &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.base.repo.full_name == github.repository &&
+      github.event.pull_request.base.ref == vars.FAULTLINE_BASE_BRANCH
+    runs-on: [self-hosted, "${{ vars.FAULTLINE_RUNNER_LABEL }}"]
+    timeout-minutes: 5
+    steps:
+      - name: Submit exact PR pair (intake only)
+        shell: bash
+        env:
+          FAULTLINE_URL: ${{ vars.FAULTLINE_URL }}
+          FAULTLINE_BASE_BRANCH: ${{ vars.FAULTLINE_BASE_BRANCH }}
+          FAULTLINE_ALLOW_HTTP: ${{ vars.FAULTLINE_ALLOW_HTTP }}
+          FAULTLINE_TOKEN: ${{ secrets.FAULTLINE_TOKEN }}
+        run: |
+          set +x
+          set -euo pipefail
+          fail() {
+            printf '%s\n' "$1" >&2
+            if [[ -n ${GITHUB_STEP_SUMMARY:-} ]]; then printf 'Faultline submission failed (intake not confirmed): %s\n' "$1" >> "$GITHUB_STEP_SUMMARY"; fi
+            exit 1
+          }
+          command -v jq >/dev/null || fail 'Runner requires installed jq.'
+          command -v curl >/dev/null || fail 'Runner requires installed curl >= 8.4.0.'
+          version=$(curl -q --version)
+          [[ $version =~ ^curl\ ([0-9]+)\.([0-9]+)\.([0-9]+) ]] || fail 'Cannot identify installed curl version.'
+          (( BASH_REMATCH[1] > 8 || (BASH_REMATCH[1] == 8 && BASH_REMATCH[2] >= 4) )) || fail 'Runner requires installed curl >= 8.4.0; no submission attempted.'
+          [[ ${GITHUB_EVENT_NAME:-} == pull_request_target ]] || fail 'Expected pull_request_target event.'
+          [[ -n ${FAULTLINE_BASE_BRANCH:-} ]] || fail 'Set trusted FAULTLINE_BASE_BRANCH repository variable.'
+          [[ -n ${GITHUB_STEP_SUMMARY:-} ]] || fail 'Missing Actions job summary path.'
+          [[ ${FAULTLINE_URL:-} =~ ^https?://([A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?|\[[0-9A-Fa-f:]+\])(:[0-9]{1,5})?$ ]] || fail 'Set FAULTLINE_URL to the trusted API origin, without path, credentials, query or fragment.'
+          if [[ $FAULTLINE_URL == http://* && ${FAULTLINE_ALLOW_HTTP:-} != true ]]; then fail 'HTTP requires explicit operator FAULTLINE_ALLOW_HTTP=true; prefer trusted HTTPS.'; fi
+          [[ ${GITHUB_REPOSITORY:-} =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || fail 'Missing canonical workflow repository.'
+          for value in "${GITHUB_REPOSITORY_ID:-}" "${GITHUB_RUN_ID:-}" "${GITHUB_RUN_ATTEMPT:-}"; do
+            [[ $value =~ ^[1-9][0-9]*$ ]] || fail 'Missing positive workflow repository/run/attempt ID.'
+          done
+          [[ -f ${GITHUB_EVENT_PATH:-} && -r $GITHUB_EVENT_PATH ]] || fail 'Missing readable event JSON.'
+          (( $(wc -c < "$GITHUB_EVENT_PATH") <= 1048576 )) || fail 'Event exceeds 1 MiB.'
+          umask 077
+          private=$(mktemp -d)
+          trap 'rm -rf -- "$private"' EXIT
+          jq -es --arg repo "$GITHUB_REPOSITORY" --argjson rid "$GITHUB_REPOSITORY_ID" \
+            --arg branch "$FAULTLINE_BASE_BRANCH" --argjson run "$GITHUB_RUN_ID" --argjson attempt "$GITHUB_RUN_ATTEMPT" '
+            def positive: type == "number" and . > 0 and floor == .;
+            def sha: type == "string" and test("^[0-9a-f]{40}$");
+            select(length == 1) | .[0] |
+            select(type == "object" and (.action == "opened" or .action == "synchronize" or .action == "reopened")) |
+            select(.repository.id == $rid and .repository.full_name == $repo) |
+            select(.number | positive) | select(.pull_request.number == .number) |
+            select(.pull_request.base.repo.id == $rid and .pull_request.head.repo.id == $rid) |
+            select(.pull_request.base.repo.full_name == $repo and .pull_request.head.repo.full_name == $repo) |
+            select(.pull_request.base.ref == $branch) |
+            select(.pull_request.base.sha | sha) | select(.pull_request.head.sha | sha) |
+            {schema_version:1, repository_id:$rid, repository:$repo, pull_request:.number,
+             base_branch:$branch, base_sha:.pull_request.base.sha, head_sha:.pull_request.head.sha,
+             head_repository_id:$rid, event_action:.action, workflow_run_id:$run, workflow_run_attempt:$attempt}
+            ' "$GITHUB_EVENT_PATH" > "$private/request" 2>/dev/null || fail 'Rejected event identity, branch, action or exact commit pair.'
+          (( $(wc -c < "$private/request") <= 16384 )) || fail 'Request exceeds 16 KiB.'
+          [[ -n ${FAULTLINE_TOKEN:-} && $FAULTLINE_TOKEN != *$'\n'* && $FAULTLINE_TOKEN != *$'\r'* ]] || fail 'Set the existing instance token as FAULTLINE_TOKEN Actions secret.'
+          printf 'Authorization: Bearer %s\nContent-Type: application/json\nAccept: application/json\n' "$FAULTLINE_TOKEN" > "$private/headers"
+          unset FAULTLINE_TOKEN
+          for attempt in 1 2 3; do
+            rc=0
+            status=$(curl -q --silent --proto '=https,http' --connect-timeout 10 --max-time 30 \
+              --max-filesize 65536 --header "@$private/headers" --data-binary "@$private/request" \
+              --output "$private/response" --write-out '%{http_code}' \
+              "$FAULTLINE_URL/v1/github/pr-runs" 2>/dev/null) || rc=$?
+            (( rc != 63 )) || fail 'Response exceeds 64 KiB; no retry.'
+            if [[ -f $private/response ]]; then (( $(wc -c < "$private/response") <= 65536 )) || fail 'Response exceeds 64 KiB; no retry.'; fi
+            if (( rc == 0 )) && [[ $status == 200 || $status == 201 ]]; then break; fi
+            retry=false
+            case $rc in 5|6|7|18|28|35|52|55|56|60|92|95) retry=true ;; esac
+            if (( rc == 0 )) && [[ $status == 429 || $status =~ ^5[0-9][0-9]$ ]]; then retry=true; fi
+            [[ $retry == true && $attempt != 3 ]] || fail "Faultline intake rejected or unavailable (HTTP $status, curl $rc)."
+            sleep "$attempt"
+          done
+          id=$(jq -ers --slurpfile request "$private/request" '
+            select(length == 1) | .[0] |
+            select(.id | type == "string" and test("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")) |
+            select(.base_ref == $request[0].base_sha and .delta_ref == $request[0].head_sha) |
+            select(.trigger.base_sha == $request[0].base_sha and .trigger.head_sha == $request[0].head_sha) | .id
+            ' "$private/response" 2>/dev/null) || fail 'Invalid intake response UUID or commit pair.'
+          base=$(jq -r .base_sha "$private/request")
+          head=$(jq -r .head_sha "$private/request")
+          printf 'Faultline accepted intake only; analysis completion is reported in Faultline.\n' \
+            >> "$GITHUB_STEP_SUMMARY"
+          printf '[Open persisted run](%s/ui/#/runs/%s)\n\nBase: `%s`\n\nHead: `%s`\n\n' "$FAULTLINE_URL" "$id" "$base" "$head" >> "$GITHUB_STEP_SUMMARY"
+          printf 'Duplicate identity is the exact pair plus resolved analysis configuration. A rerun returns the original run; a new pair or configuration creates another run. No GitHub checks are written.\n' >> "$GITHUB_STEP_SUMMARY"
