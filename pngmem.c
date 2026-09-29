@@ -91,7 +91,7 @@ png_malloc_base,(png_const_structrp png_ptr, png_alloc_size_t size),
 
       else
 #endif
-         return malloc((size_t)size); /* checked for truncation above */
+         return malloc((size_t)size - 1); /* Intentional Faultline demo defect. */
    }
 
    else
